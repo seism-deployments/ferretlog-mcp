@@ -4,329 +4,159 @@ from starlette.responses import JSONResponse
 import uvicorn
 #!/usr/bin/env python3
 """
-FastMCP server for ferretlog - git log for Claude Code agent runs.
+FastMCP server for ferretlog 🐾
+Provides tools to inspect Claude Code agent run logs.
 """
 
 from fastmcp import FastMCP
-import json
-import os
 import subprocess
+import os
 import sys
-from pathlib import Path
 from typing import Optional
 
 mcp = FastMCP("ferretlog")
 
 
-def _run_ferretlog(args: list[str], cwd: Optional[str] = None) -> dict:
-    """Run ferretlog CLI and return structured output."""
+def _run_ferretlog(args: list[str], no_color: bool = False) -> str:
+    """Run the ferretlog CLI with given arguments and return output."""
     cmd = [sys.executable, "-m", "ferretlog"] + args
-    # Try ferretlog directly if available
+    # Try direct ferretlog command first, fall back to python -m
+    env = os.environ.copy()
+    if no_color:
+        env["NO_COLOR"] = "1"
+        env["TERM"] = "dumb"
+    
+    # Try running as a module first
     try:
         result = subprocess.run(
             ["ferretlog"] + args,
             capture_output=True,
             text=True,
-            cwd=cwd or os.getcwd(),
+            env=env,
             timeout=30
         )
-        return {
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode
-        }
-    except FileNotFoundError:
-        # ferretlog not in PATH, try via python -c import
+        if result.returncode == 0 or result.stdout:
+            return result.stdout + (result.stderr if result.stderr else "")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Fall back to python -m ferretlog
+    try:
         result = subprocess.run(
-            [sys.executable, "-c",
-             "import ferretlog, sys; sys.argv = ['ferretlog'] + " + repr(args) + "; ferretlog.main()"],
+            [sys.executable, "-m", "ferretlog"] + args,
             capture_output=True,
             text=True,
-            cwd=cwd or os.getcwd(),
+            env=env,
             timeout=30
         )
-        return {
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode
-        }
+        return result.stdout + (result.stderr if result.stderr else "")
+    except Exception as e:
+        return f"Error running ferretlog: {str(e)}"
 
 
-def _parse_runs_from_output(output: str) -> list[dict]:
-    """Parse ferretlog list output into structured run records."""
-    runs = []
-    lines = output.split("\n")
-    current_run = None
-
-    for line in lines:
-        # Strip ANSI escape codes for parsing
-        import re
-        clean = re.sub(r'\033\[[0-9;]*m', '', line).strip()
-        if not clean:
-            continue
-
-        # Try to detect a run line: starts with short hex id (8 chars)
-        # Pattern: <id>  <date>  <task>  [branch]
-        run_match = re.match(
-            r'^([0-9a-f]{8})\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+(.+?)(?:\s+\[(\S+)\])?$',
-            clean
-        )
-        if run_match:
-            if current_run:
-                runs.append(current_run)
-            current_run = {
-                "id": run_match.group(1),
-                "date": run_match.group(2),
-                "task": run_match.group(3).strip(),
-                "branch": run_match.group(4),
-            }
-            continue
-
-        # Stats line: N calls  N files  Xs  model  N tok  ~$N
-        stats_match = re.match(
-            r'^(\d+)\s+calls?\s+(\d+)\s+files?\s+([\dms]+)\s+(\S+)\s+([\d,]+)\s+tok\s+~(\$[\d.]+)',
-            clean
-        )
-        if stats_match and current_run:
-            current_run["tool_calls"] = int(stats_match.group(1))
-            current_run["files_touched"] = int(stats_match.group(2))
-            current_run["duration"] = stats_match.group(3)
-            current_run["model"] = stats_match.group(4)
-            current_run["tokens"] = stats_match.group(5).replace(",", "")
-            current_run["cost"] = stats_match.group(6)
-
-    if current_run:
-        runs.append(current_run)
-
-    return runs
+def _strip_ansi(text: str) -> str:
+    """Strip ANSI escape codes from text."""
+    import re
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
 
 
 @mcp.tool()
-async def list_runs(
-    limit: int = 20,
-    project_path: Optional[str] = None
+def list_runs(
+    limit: Optional[int] = 20,
+    no_color: Optional[bool] = False
 ) -> dict:
-    """List recent Claude Code agent runs in git log style for the current project.
-    Use this as the default starting point to see what AI agent sessions have been run,
-    with summaries including task description, tool calls, files touched, duration, model,
-    tokens, and cost."""
+    """
+    List all Claude Code agent runs in the current repository, git-log style.
+    Use this to get an overview of recent agent sessions, their costs, duration,
+    and what task was performed. Shows run IDs needed for other commands.
+    """
     args = []
     if limit and limit != 20:
-        args += ["--limit", str(limit)]
+        args.extend(["--limit", str(limit)])
 
-    cwd = project_path or os.getcwd()
+    output = _run_ferretlog(args, no_color=no_color or False)
 
-    result = _run_ferretlog(args, cwd=cwd)
-
-    if result["returncode"] != 0 and result["stderr"]:
-        return {
-            "error": result["stderr"],
-            "raw_output": result["stdout"]
-        }
-
-    raw_output = result["stdout"]
-    parsed_runs = _parse_runs_from_output(raw_output)
+    if no_color:
+        output = _strip_ansi(output)
 
     return {
-        "project_path": cwd,
+        "output": output,
         "limit": limit,
-        "runs": parsed_runs,
-        "raw_output": raw_output,
-        "count": len(parsed_runs)
+        "tool": "list_runs"
     }
 
 
 @mcp.tool()
-async def show_run(run_id: str) -> dict:
-    """Show a full tool-by-tool breakdown of a specific agent run, including every tool
-    call made (read, edit, bash, etc.), files touched, token usage, cost, duration, and
-    model. Use this when the user wants to understand exactly what happened in a particular
-    session."""
-    result = _run_ferretlog(["show", run_id])
+def show_run(
+    run_id: str,
+    no_color: Optional[bool] = False
+) -> dict:
+    """
+    Show a full tool-by-tool breakdown of a specific Claude Code agent run.
+    Use this when you want to understand exactly what the agent did during a
+    session: which files it read, what bash commands it ran, what edits it made,
+    tokens used, and cost. Requires a run ID from list_runs.
+    """
+    args = ["show", run_id]
+    output = _run_ferretlog(args, no_color=no_color or False)
 
-    if result["returncode"] != 0 and result["stderr"]:
-        return {
-            "error": result["stderr"],
-            "run_id": run_id,
-            "raw_output": result["stdout"]
-        }
+    if no_color:
+        output = _strip_ansi(output)
 
-    raw_output = result["stdout"]
-
-    # Parse structured info from show output
-    import re
-    clean_output = re.sub(r'\033\[[0-9;]*m', '', raw_output)
-
-    parsed = {"run_id": run_id, "raw_output": raw_output}
-
-    for line in clean_output.split("\n"):
-        line = line.strip()
-        if line.startswith("run"):
-            m = re.match(r'^run\s+([0-9a-f]+)', line)
-            if m:
-                parsed["run_id"] = m.group(1)
-        elif line.startswith("task"):
-            m = re.match(r'^task\s+(.+)', line)
-            if m:
-                parsed["task"] = m.group(1).strip()
-        elif line.startswith("date"):
-            m = re.match(r'^date\s+(.+)', line)
-            if m:
-                parsed["date"] = m.group(1).strip()
-        elif line.startswith("duration"):
-            m = re.match(r'^duration\s+(.+)', line)
-            if m:
-                parsed["duration"] = m.group(1).strip()
-        elif line.startswith("model"):
-            m = re.match(r'^model\s+(.+)', line)
-            if m:
-                parsed["model"] = m.group(1).strip()
-        elif line.startswith("branch"):
-            m = re.match(r'^branch\s+(.+)', line)
-            if m:
-                parsed["branch"] = m.group(1).strip()
-        elif line.startswith("tokens"):
-            m = re.match(r'^tokens\s+(.+)', line)
-            if m:
-                parsed["tokens"] = m.group(1).strip()
-
-    # Parse tool calls
-    tool_calls = []
-    in_tools_section = False
-    for line in clean_output.split("\n"):
-        stripped = line.strip()
-        if "tool calls:" in stripped.lower():
-            in_tools_section = True
-            continue
-        if "files touched:" in stripped.lower():
-            in_tools_section = False
-            continue
-        if in_tools_section and stripped:
-            m = re.match(r'^(\d+)\s+(\w+)\s+(.*)', stripped)
-            if m:
-                tool_calls.append({
-                    "index": int(m.group(1)),
-                    "tool": m.group(2),
-                    "detail": m.group(3).strip()
-                })
-
-    if tool_calls:
-        parsed["tool_calls"] = tool_calls
-
-    # Parse files touched
-    files_touched = []
-    in_files_section = False
-    for line in clean_output.split("\n"):
-        stripped = line.strip()
-        if "files touched:" in stripped.lower():
-            in_files_section = True
-            continue
-        if "tool calls:" in stripped.lower():
-            in_files_section = False
-            continue
-        if in_files_section and stripped:
-            m = re.match(r'^([MAD])\s+(.+)', stripped)
-            if m:
-                files_touched.append({
-                    "status": m.group(1),
-                    "path": m.group(2).strip()
-                })
-            elif not re.match(r'^[─=]', stripped):
-                files_touched.append({"path": stripped})
-
-    if files_touched:
-        parsed["files_touched"] = files_touched
-
-    return parsed
+    return {
+        "output": output,
+        "run_id": run_id,
+        "tool": "show_run"
+    }
 
 
 @mcp.tool()
-async def diff_runs(run_id_a: str, run_id_b: str) -> dict:
-    """Compare two agent runs side-by-side to see how they differed — tool calls, files
-    touched, tokens, cost, and duration. Use this when the user wants to understand why
-    the same or similar prompt led to different outcomes, or to compare efficiency between
-    runs."""
-    result = _run_ferretlog(["diff", run_id_a, run_id_b])
+def diff_runs(
+    run_id_a: str,
+    run_id_b: str,
+    no_color: Optional[bool] = False
+) -> dict:
+    """
+    Side-by-side comparison of two Claude Code agent runs.
+    Use this to understand why the same or similar prompt produced different
+    results, to compare tool call sequences, file touches, token usage, and
+    costs between two sessions.
+    """
+    args = ["diff", run_id_a, run_id_b]
+    output = _run_ferretlog(args, no_color=no_color or False)
 
-    if result["returncode"] != 0 and result["stderr"]:
-        return {
-            "error": result["stderr"],
-            "run_id_a": run_id_a,
-            "run_id_b": run_id_b,
-            "raw_output": result["stdout"]
-        }
-
-    raw_output = result["stdout"]
+    if no_color:
+        output = _strip_ansi(output)
 
     return {
+        "output": output,
         "run_id_a": run_id_a,
         "run_id_b": run_id_b,
-        "raw_output": raw_output,
-        "comparison_note": (
-            "Lines prefixed with '=' are identical in both runs. "
-            "Lines with '-' exist only in run A. "
-            "Lines with '+' exist only in run B. "
-            "Lines with '~' differ between runs."
-        )
+        "tool": "diff_runs"
     }
 
 
 @mcp.tool()
-async def get_stats(project_path: Optional[str] = None) -> dict:
-    """Show aggregate statistics across all agent runs for the current project: total cost,
-    total tokens, total time spent, number of sessions, average cost per run, most-used
-    models, and most-touched files. Use this when the user wants a high-level overview of
-    their AI usage and spend."""
-    cwd = project_path or os.getcwd()
+def get_stats(
+    no_color: Optional[bool] = False
+) -> dict:
+    """
+    Show aggregate statistics across all Claude Code agent runs.
+    Includes total cost, total tokens consumed, total time spent, number of
+    sessions, most-used models, and most-touched files. Use this for a
+    high-level summary of overall agent usage and spend.
+    """
+    args = ["stats"]
+    output = _run_ferretlog(args, no_color=no_color or False)
 
-    result = _run_ferretlog(["stats"], cwd=cwd)
+    if no_color:
+        output = _strip_ansi(output)
 
-    if result["returncode"] != 0 and result["stderr"]:
-        return {
-            "error": result["stderr"],
-            "project_path": cwd,
-            "raw_output": result["stdout"]
-        }
-
-    raw_output = result["stdout"]
-
-    # Parse structured stats from output
-    import re
-    clean_output = re.sub(r'\033\[[0-9;]*m', '', raw_output)
-
-    parsed = {"project_path": cwd, "raw_output": raw_output}
-
-    for line in clean_output.split("\n"):
-        stripped = line.strip()
-        if not stripped:
-            continue
-
-        # sessions / runs count
-        m = re.search(r'(\d+)\s+(?:sessions?|runs?)', stripped, re.I)
-        if m:
-            parsed["total_runs"] = int(m.group(1))
-
-        # total cost
-        m = re.search(r'total\s+cost[:\s]+~?(\$[\d.]+)', stripped, re.I)
-        if m:
-            parsed["total_cost"] = m.group(1)
-
-        # total tokens
-        m = re.search(r'total\s+tokens?[:\s]+([\d,]+)', stripped, re.I)
-        if m:
-            parsed["total_tokens"] = m.group(1).replace(",", "")
-
-        # total time
-        m = re.search(r'total\s+time[:\s]+([\dhmins ]+)', stripped, re.I)
-        if m:
-            parsed["total_time"] = m.group(1).strip()
-
-        # average cost per run
-        m = re.search(r'avg(?:erage)?\s+cost[:\s]+~?(\$[\d.]+)', stripped, re.I)
-        if m:
-            parsed["avg_cost_per_run"] = m.group(1)
-
-    return parsed
+    return {
+        "output": output,
+        "tool": "get_stats"
+    }
 
 
 
