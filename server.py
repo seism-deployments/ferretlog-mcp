@@ -146,7 +146,7 @@ async def tools(request):
     tool_list = [{"name": t.name, "description": t.description or ""} for t in registered]
     return JSONResponse({"tools": tool_list, "count": len(tool_list)})
 
-mcp_app = mcp.http_app()
+mcp_app = mcp.http_app(transport="streamable-http")
 
 app = Starlette(
     routes=[
