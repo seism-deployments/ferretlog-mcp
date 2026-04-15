@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-ferretlog MCP server
-Exposes ferretlog CLI commands as MCP tools.
+ferretlog MCP Server — exposes ferretlog CLI functionality via FastMCP tools.
 """
 
+import asyncio
+import json
+import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import Optional
 
 from fastmcp import FastMCP
@@ -13,144 +16,140 @@ from fastmcp import FastMCP
 mcp = FastMCP("ferretlog")
 
 
-def _run_ferretlog(*args: str) -> str:
-    """Run a ferretlog command and return its output."""
+async def _run_ferretlog(*args: str, cwd: Optional[str] = None) -> str:
+    """Run ferretlog CLI and return output."""
     cmd = [sys.executable, "-m", "ferretlog"] + list(args)
-    # Try direct ferretlog command first
+    # Try direct ferretlog command first, fallback to python -m
+    env = os.environ.copy()
+
     try:
-        result = subprocess.run(
-            ["ferretlog"] + list(args),
-            capture_output=True,
-            text=True,
-            timeout=30,
+        proc = await asyncio.create_subprocess_exec(
+            "ferretlog", *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
         )
-        if result.returncode == 0 or result.stdout:
-            return result.stdout + (result.stderr if result.stderr else "")
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            return stdout.decode("utf-8", errors="replace")
+        # If ferretlog binary failed, include stderr
+        err = stderr.decode("utf-8", errors="replace")
+        if err:
+            return f"Error running ferretlog:\n{err}"
+        return stdout.decode("utf-8", errors="replace")
     except FileNotFoundError:
         pass
 
-    # Fallback: try python -m ferretlog
+    # Fallback: try running the ferretlog.py module directly
+    ferretlog_py = Path(__file__).parent / "ferretlog.py"
+    if ferretlog_py.exists():
+        cmd = [sys.executable, str(ferretlog_py)] + list(args)
+    else:
+        # Last resort: python -c import ferretlog
+        cmd = [sys.executable, "-c",
+               f"import ferretlog; import sys; sys.argv = ['ferretlog'] + {list(args)!r}; ferretlog.main()"]
+
     try:
-        result = subprocess.run(
-            [sys.executable, "-m", "ferretlog"] + list(args),
-            capture_output=True,
-            text=True,
-            timeout=30,
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
         )
-        return result.stdout + (result.stderr if result.stderr else "")
+        stdout, stderr = await proc.communicate()
+        output = stdout.decode("utf-8", errors="replace")
+        err = stderr.decode("utf-8", errors="replace")
+        if proc.returncode != 0 and err:
+            return f"Error:\n{err}\n{output}"
+        return output
     except Exception as e:
-        return f"Error running ferretlog: {e}"
+        return f"Failed to run ferretlog: {e}"
 
 
 @mcp.tool()
 async def list_runs(
     limit: int = 20,
-    no_color: bool = False,
+    project_path: Optional[str] = None,
 ) -> dict:
-    """List recent Claude Code agent runs in git-log style.
-
-    Use this to get an overview of all agent sessions, their tasks, costs,
-    duration, and token usage. Shows run IDs needed for other commands.
-    Use this as the starting point when the user wants to see their agent history.
-
-    Args:
-        limit: Maximum number of recent runs to display (default: 20)
-        no_color: Disable colored output for plain text display (default: False)
-
-    Returns:
-        A dict with the list of recent runs as formatted text.
+    """
+    List recent Claude Code agent runs in git-log style for the current project.
+    Use this as the default starting point to see what agent sessions have been run,
+    their tasks, costs, token usage, and duration.
+    Shows run IDs needed for other commands.
     """
     args = []
     if limit and limit != 20:
         args += ["--limit", str(limit)]
-    if no_color:
-        args += ["--no-color"]
 
-    output = _run_ferretlog(*args)
+    cwd = project_path if project_path else None
+
+    output = await _run_ferretlog(*args, cwd=cwd)
+
     return {
         "output": output,
-        "description": "Recent Claude Code agent runs",
+        "limit": limit,
+        "project_path": project_path or os.getcwd(),
     }
 
 
 @mcp.tool()
 async def show_run(run_id: str) -> dict:
-    """Show a full tool-by-tool breakdown of a specific agent run.
-
-    Use this when the user wants to understand exactly what an agent did during
-    a session — which files it read/edited, what commands it ran, tokens used,
-    and cost. Requires a run ID from list_runs.
-
-    Args:
-        run_id: The run ID (short hash) to inspect, e.g. 'a3f2b1c9'.
-                Get this from list_runs.
-
-    Returns:
-        A dict with the full tool-by-tool breakdown of the run.
     """
-    if not run_id:
-        return {"error": "run_id is required"}
+    Display a full tool-by-tool breakdown of a specific agent run.
+    Use this when you need to understand exactly what an agent did during a session
+    — which files it read, what bash commands it ran, what edits it made,
+    and full token/cost details.
+    Requires a run ID from list_runs.
+    """
+    if not run_id or not run_id.strip():
+        return {"error": "run_id is required. Obtain it from list_runs."}
 
-    output = _run_ferretlog("show", run_id)
+    output = await _run_ferretlog("show", run_id.strip())
+
     return {
-        "run_id": run_id,
         "output": output,
-        "description": f"Details of agent run {run_id}",
+        "run_id": run_id.strip(),
     }
 
 
 @mcp.tool()
 async def diff_runs(run_id_a: str, run_id_b: str) -> dict:
-    """Compare two agent runs side-by-side.
-
-    Use this when the user wants to understand why the same or similar prompt
-    produced different results across two sessions, or to compare efficiency
-    between runs. Shows differences in tool calls, files touched, and cost.
-
-    Args:
-        run_id_a: The first run ID to compare, e.g. 'a3f2b1c9'. Get this from list_runs.
-        run_id_b: The second run ID to compare, e.g. '9c1b2d3e'. Get this from list_runs.
-
-    Returns:
-        A dict with the side-by-side comparison of the two runs.
     """
-    if not run_id_a:
-        return {"error": "run_id_a is required"}
-    if not run_id_b:
-        return {"error": "run_id_b is required"}
+    Compare two agent runs side-by-side to understand why the same or similar prompts
+    produced different results. Use this to analyze differences in tool call sequences,
+    files touched, duration, or cost between two sessions.
+    """
+    if not run_id_a or not run_id_a.strip():
+        return {"error": "run_id_a is required. Obtain it from list_runs."}
+    if not run_id_b or not run_id_b.strip():
+        return {"error": "run_id_b is required. Obtain it from list_runs."}
 
-    output = _run_ferretlog("diff", run_id_a, run_id_b)
+    output = await _run_ferretlog("diff", run_id_a.strip(), run_id_b.strip())
+
     return {
-        "run_id_a": run_id_a,
-        "run_id_b": run_id_b,
         "output": output,
-        "description": f"Comparison between agent runs {run_id_a} and {run_id_b}",
+        "run_id_a": run_id_a.strip(),
+        "run_id_b": run_id_b.strip(),
     }
 
 
 @mcp.tool()
-async def get_stats(no_color: bool = False) -> dict:
-    """Show aggregate statistics across all Claude Code agent sessions.
-
-    Shows total cost, total tokens consumed, total time spent, number of runs,
-    average run cost, and model usage breakdown. Use this when the user wants
-    a high-level summary of their overall agent usage or wants to understand
-    cumulative spending.
-
-    Args:
-        no_color: Disable colored output for plain text display (default: False)
-
-    Returns:
-        A dict with aggregate statistics across all agent sessions.
+async def get_stats(project_path: Optional[str] = None) -> dict:
     """
-    args = ["stats"]
-    if no_color:
-        args += ["--no-color"]
+    Show aggregate statistics across all agent runs for the current project,
+    including total cost, total tokens consumed, total time spent,
+    and per-model breakdowns.
+    Use this to understand overall agent usage, spending, and efficiency trends.
+    """
+    cwd = project_path if project_path else None
 
-    output = _run_ferretlog(*args)
+    output = await _run_ferretlog("stats", cwd=cwd)
+
     return {
         "output": output,
-        "description": "Aggregate statistics across all Claude Code agent sessions",
+        "project_path": project_path or os.getcwd(),
     }
 
 
