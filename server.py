@@ -183,8 +183,8 @@ class _BrowserFallback:
             if "text/event-stream" not in accept:
                 tools = []
                 try:
-                    for t in mcp._tool_manager._tools.values():
-                        tools.append({"name": t.name, "description": t.description or ""})
+                    registered = await mcp.list_tools()
+                    tools = [{"name": t.name, "description": t.description or ""} for t in registered]
                 except Exception:
                     pass
                 resp = JSONResponse({
