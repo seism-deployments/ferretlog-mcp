@@ -1,3 +1,4 @@
+ARG CACHEBUST=1776286600726
 FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt .
