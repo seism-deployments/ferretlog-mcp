@@ -182,11 +182,12 @@ class _BrowserFallback:
             accept = headers.get(b"accept", b"").decode()
             if "text/event-stream" not in accept:
                 tools = []
+                error_msg = None
                 try:
                     registered = await mcp.list_tools()
                     tools = [{"name": t.name, "description": t.description or ""} for t in registered]
-                except Exception:
-                    pass
+                except Exception as e:
+                    error_msg = f"{type(e).__name__}: {e}" 
                 resp = JSONResponse({
                     "server": mcp.name,
                     "protocol": "MCP (Model Context Protocol)",
@@ -194,7 +195,8 @@ class _BrowserFallback:
                     "endpoint": "/mcp",
                     "tools": tools,
                     "tool_count": len(tools),
-                    "usage": "Connect with an MCP client (Claude Desktop, Cursor, etc.) using this URL."
+                    "usage": "Connect with an MCP client (Claude Desktop, Cursor, etc.) using this URL.",
+                    "debug_error": error_msg
                 })
                 await resp(scope, receive, send)
                 return
