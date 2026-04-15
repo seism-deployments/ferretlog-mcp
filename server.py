@@ -1,7 +1,7 @@
+import uvicorn
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 from starlette.responses import JSONResponse
-import uvicorn
 #!/usr/bin/env python3
 """
 FastMCP server for ferretlog 🐾
@@ -157,9 +157,6 @@ def get_stats(
         "output": output,
         "tool": "get_stats"
     }
-
-
-
 
 async def health(request):
     return JSONResponse({"status": "ok", "server": mcp.name})
