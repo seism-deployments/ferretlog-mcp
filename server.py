@@ -1,4 +1,6 @@
 import uvicorn
+from starlette.applications import Starlette
+from starlette.routing import Route, Mount
 from starlette.responses import JSONResponse
 #!/usr/bin/env python3
 """
@@ -167,42 +169,19 @@ async def get_stats(project_path: Optional[str] = None) -> dict:
     }
 
 
+async def health(request):
+    return JSONResponse({"status": "ok", "server": mcp.name})
 
+async def tools(request):
+    registered = await mcp.list_tools()
+    tool_list = [{"name": t.name, "description": t.description or ""} for t in registered]
+    return JSONResponse({"tools": tool_list, "count": len(tool_list)})
 
-# ── Browser-friendly entrypoint ──────────────────────────────
-class _BrowserFallback:
-    """Intercept browser GETs to /mcp and return server info as JSON."""
-    def __init__(self, app):
-        self.app = app
-    async def __call__(self, scope, receive, send):
-        if (scope["type"] == "http"
-            and scope["path"] == "/mcp"
-            and scope["method"] == "GET"):
-            headers = dict(scope.get("headers", []))
-            accept = headers.get(b"accept", b"").decode()
-            if "text/event-stream" not in accept:
-                tools = []
-                error_msg = None
-                try:
-                    registered = await mcp.list_tools()
-                    tools = [{"name": t.name, "description": t.description or ""} for t in registered]
-                except Exception as e:
-                    error_msg = f"{type(e).__name__}: {e}" 
-                resp = JSONResponse({
-                    "server": mcp.name,
-                    "protocol": "MCP (Model Context Protocol)",
-                    "transport": "streamable-http",
-                    "endpoint": "/mcp",
-                    "tools": tools,
-                    "tool_count": len(tools),
-                    "usage": "Connect with an MCP client (Claude Desktop, Cursor, etc.) using this URL.",
-                    "debug_error": error_msg
-                })
-                await resp(scope, receive, send)
-                return
-        await self.app(scope, receive, send)
-
-app = _BrowserFallback(mcp.http_app())
+app = Starlette(routes=[
+    Route("/health", health),
+    Route("/tools", tools),
+    Mount("/", mcp.http_app()),
+])
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
