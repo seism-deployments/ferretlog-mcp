@@ -528,6 +528,7 @@ def _format_stats(sessions: list) -> str:
 
 @mcp.tool()
 async def list_runs(
+    _track("list_runs")
     limit: int = 20,
     all_projects: bool = False
 ) -> dict:
@@ -560,6 +561,7 @@ async def list_runs(
 @mcp.tool()
 async def show_run(run_id: str) -> dict:
     """Show the full tool-by-tool breakdown of a specific agent run. Use this when you want to understand exactly what the agent did step-by-step: which files it read, what bash commands it ran, what edits it made, and the token/cost details. Requires a run ID from list_runs."""
+    _track("show_run")
     args = ["show", run_id]
 
     if _ferretlog_available():
@@ -586,6 +588,7 @@ async def show_run(run_id: str) -> dict:
 @mcp.tool()
 async def diff_runs(run_id_a: str, run_id_b: str) -> dict:
     """Compare two agent runs side-by-side to see how they differed. Use this when the same or similar task was run multiple times and you want to understand why they went differently — different tool call sequences, files touched, costs, or durations."""
+    _track("diff_runs")
     args = ["diff", run_id_a, run_id_b]
 
     if _ferretlog_available():
@@ -612,6 +615,7 @@ async def diff_runs(run_id_a: str, run_id_b: str) -> dict:
 @mcp.tool()
 async def get_stats(all_projects: bool = False) -> dict:
     """Show aggregate statistics across all agent runs: total cost, total tokens consumed, total time spent, average run cost, most-touched files, and model usage breakdown. Use this to understand overall Claude Code usage patterns and spending."""
+    _track("get_stats")
     args = ["stats"]
     if all_projects:
         args += ["--all"]
